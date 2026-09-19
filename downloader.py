@@ -2,9 +2,13 @@
 下载引擎 - 递归遍历课程内容并下载所有文件
 """
 
+import json
+import mimetypes
 import os
-import re
 import time
+from email.message import Message
+from html.parser import HTMLParser
+from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 from rich.console import Console
@@ -19,7 +23,7 @@ from rich.progress import (
 )
 
 from api import BlackboardAPI
-from config import DEFAULT_DOWNLOAD_DIR, INVALID_CHARS, MAX_RETRIES
+from config import BB_BASE_URL, DEFAULT_DOWNLOAD_DIR, INVALID_CHARS, MAX_RETRIES
 
 console = Console()
 
@@ -37,6 +41,84 @@ FOLDER_TYPES = [
     "resource/x-bb-lesson",
     "resource/x-bb-coursemodule",
 ]
+
+EMBEDDED_FILE_STUB = "@X@EmbeddedFile.requestUrlStub@X@"
+
+
+class _EmbeddedFileLinkParser(HTMLParser):
+    """Extract downloadable BbML links from body/instructions HTML."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[dict] = []
+
+    def handle_starttag(self, _tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = {key.lower(): value for key, value in attrs}
+        raw_metadata = attributes.get("data-bbfile")
+        metadata: dict = {}
+        if raw_metadata:
+            try:
+                metadata = json.loads(raw_metadata)
+            except (TypeError, ValueError):
+                metadata = {}
+
+        url = (
+            metadata.get("resourceUrl")
+            or metadata.get("viewerUrl")
+            or attributes.get("href")
+            or attributes.get("src")
+            or attributes.get("data-src")
+        )
+        if not url:
+            return
+
+        file_size = metadata.get("fileSize", -1)
+        try:
+            file_size = int(file_size)
+        except (TypeError, ValueError):
+            file_size = -1
+
+        self.links.append({
+            "url": url,
+            "name": (
+                metadata.get("displayName")
+                or metadata.get("fileName")
+                or metadata.get("linkName")
+                or attributes.get("alt")
+                or ""
+            ),
+            "mime_type": metadata.get("mimeType", ""),
+            "size": file_size,
+        })
+
+
+def extract_embedded_files(*html_fragments: str | None) -> list[dict]:
+    """Return unique embedded file links found in BbML/HTML fragments."""
+    parser = _EmbeddedFileLinkParser()
+    for fragment in html_fragments:
+        if fragment:
+            parser.feed(str(fragment))
+
+    files = []
+    seen = set()
+    for item in parser.links:
+        key = (item["url"], item["name"])
+        if key in seen:
+            continue
+        seen.add(key)
+        files.append(item)
+    return files
+
+
+def filename_from_content_disposition(value: str | None) -> str | None:
+    """Parse both regular and RFC 5987 Content-Disposition filenames."""
+    if not value:
+        return None
+
+    message = Message()
+    message["content-disposition"] = value
+    filename = message.get_filename()
+    return unquote(filename) if filename else None
 
 
 def sanitize_filename(name: str) -> str:
@@ -102,6 +184,7 @@ class CourseDownloader:
             "files_failed": 0,
             "total_bytes": 0,
         }
+        self._embedded_urls: set[str] = set()
 
     def download_course(self, course_id: str, course_name: str) -> None:
         """
@@ -126,6 +209,8 @@ class CourseDownloader:
 
             for content in contents:
                 self._process_content(course_id, content, course_dir)
+
+            self._download_announcement_files(course_id, course_dir)
 
         except requests.exceptions.HTTPError as e:
             if hasattr(e, 'response') and e.response is not None and e.response.status_code == 403:
@@ -165,9 +250,83 @@ class CourseDownloader:
             except Exception as e:
                 console.print(f"   [yellow]⚠ 无法获取 '{title}' 的子内容: {e}[/yellow]")
 
+        self._download_embedded_files(content, parent_dir)
+
         # 如果可能包含附件，尝试下载
         if handler_id in CONTENT_TYPES_WITH_ATTACHMENTS or not handler_id:
             self._download_attachments(course_id, content_id, title, parent_dir)
+
+    def _resolve_embedded_url(self, raw_url: str) -> str | None:
+        """Resolve a BbML file URL and keep requests on the Blackboard host."""
+        normalized = raw_url.replace(EMBEDDED_FILE_STUB, "").strip()
+        resolved = urljoin(f"{BB_BASE_URL.rstrip('/')}/", normalized)
+        target = urlparse(resolved)
+        base = urlparse(BB_BASE_URL)
+
+        if target.scheme not in ("http", "https") or not target.hostname:
+            return None
+        if target.hostname != base.hostname and not target.hostname.endswith(
+            f".{base.hostname}"
+        ):
+            return None
+        if "bbcswebdav" not in target.path.lower():
+            return None
+        return resolved
+
+    def _download_embedded_files(self, content: dict, parent_dir: str) -> None:
+        """Download files embedded in content bodies and assessment instructions."""
+        handler = content.get("contentHandler") or {}
+        embedded_files = extract_embedded_files(
+            content.get("body"),
+            handler.get("instructions"),
+        )
+
+        for item in embedded_files:
+            resolved_url = self._resolve_embedded_url(item.get("url", ""))
+            if not resolved_url or resolved_url in self._embedded_urls:
+                continue
+
+            self._embedded_urls.add(resolved_url)
+            file_name = item.get("name") or unquote(
+                os.path.basename(urlparse(resolved_url).path)
+            )
+            if not file_name:
+                file_name = "embedded_file"
+
+            if not os.path.splitext(file_name)[1] and item.get("mime_type"):
+                extension = mimetypes.guess_extension(item["mime_type"])
+                if extension:
+                    file_name += extension
+
+            safe_name = sanitize_filename(file_name)
+            file_path = os.path.join(parent_dir, safe_name)
+            self._download_file(
+                file_path,
+                safe_name,
+                lambda url=resolved_url: self.api.download_url(url),
+                expected_size=item.get("size", -1),
+            )
+
+    def _download_announcement_files(
+        self,
+        course_id: str,
+        course_dir: str,
+    ) -> None:
+        """Download files embedded in course announcements."""
+        try:
+            announcements = self.api.get_course_announcements(course_id)
+        except Exception:
+            return
+
+        for announcement in announcements:
+            body = announcement.get("body")
+            if not extract_embedded_files(body):
+                continue
+
+            title = sanitize_filename(announcement.get("title") or "Announcement")
+            announcement_dir = os.path.join(course_dir, "Announcements", title)
+            os.makedirs(announcement_dir, exist_ok=True)
+            self._download_embedded_files({"body": body}, announcement_dir)
 
     def _download_attachments(
         self,
@@ -200,58 +359,61 @@ class CourseDownloader:
             safe_name = sanitize_filename(file_name)
             file_path = os.path.join(parent_dir, safe_name)
 
-            # 检查文件是否已存在（简单的大小比对）
-            if os.path.exists(file_path):
-                existing_size = os.path.getsize(file_path)
-                expected_size = attachment.get("size", -1)
-                if expected_size > 0 and existing_size == expected_size:
-                    self.stats["files_skipped"] += 1
-                    console.print(f"   [dim]⏭ 已存在: {safe_name}[/dim]")
-                    continue
-
             # 下载文件
             self._download_file(
-                course_id, content_id, attachment_id, file_path, safe_name
+                file_path,
+                safe_name,
+                lambda: self.api.download_attachment(
+                    course_id, content_id, attachment_id
+                ),
+                expected_size=attachment.get("size", -1),
             )
 
     def _download_file(
         self,
-        course_id: str,
-        content_id: str,
-        attachment_id: str,
         file_path: str,
         display_name: str,
+        response_factory,
+        expected_size: int = -1,
     ) -> None:
         """
         下载单个文件（带重试和进度条）
 
         Args:
-            course_id: 课程 ID
-            content_id: 内容 ID
-            attachment_id: 附件 ID
             file_path: 保存路径
             display_name: 显示名称
+            response_factory: 返回流式响应的无参数函数
+            expected_size: 预期文件大小，用于跳过已下载文件
         """
+        if (
+            os.path.exists(file_path)
+            and expected_size > 0
+            and os.path.getsize(file_path) == expected_size
+        ):
+            self.stats["files_skipped"] += 1
+            console.print(f"   [dim]⏭ 已存在: {display_name}[/dim]")
+            return
+
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                resp = self.api.download_attachment(
-                    course_id, content_id, attachment_id
-                )
+                resp = response_factory()
 
                 # 获取文件大小
-                total_size = int(resp.headers.get("content-length", 0))
+                total_size = int(resp.headers.get("content-length", 0) or 0)
+                if total_size <= 0 and expected_size > 0:
+                    total_size = expected_size
 
                 # 如果响应头有文件名，优先使用
-                content_disp = resp.headers.get("content-disposition", "")
-                if "filename=" in content_disp:
-                    match = re.search(r'filename[*]?=["\']?([^"\';\n]+)', content_disp)
-                    if match:
-                        server_name = match.group(1).strip()
-                        if server_name:
-                            safe_server_name = sanitize_filename(server_name)
-                            parent = os.path.dirname(file_path)
-                            file_path = os.path.join(parent, safe_server_name)
-                            display_name = safe_server_name
+                server_name = filename_from_content_disposition(
+                    resp.headers.get("content-disposition")
+                )
+                if server_name:
+                    safe_server_name = sanitize_filename(server_name)
+                    if safe_server_name != display_name:
+                        file_path = os.path.join(
+                            os.path.dirname(file_path), safe_server_name
+                        )
+                        display_name = safe_server_name
 
                 # 确保路径唯一
                 file_path = ensure_unique_path(file_path)

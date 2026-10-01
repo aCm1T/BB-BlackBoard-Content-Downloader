@@ -142,6 +142,27 @@ def select_courses(courses: list[dict], keywords: list[str] | None = None) -> li
             console.print("[yellow]请输入数字编号，用逗号分隔[/yellow]")
 
 
+def get_available_courses(api: BlackboardAPI, memberships: list[dict]) -> list[dict]:
+    """Return accessible courses with the fields needed for selection and download."""
+    courses = []
+    for membership in memberships:
+        course_id = membership.get("courseId", "")
+        if not course_id:
+            continue
+        try:
+            course = api.get_course(course_id)
+        except Exception:
+            continue
+        if not isinstance(course, dict) or not all(
+            course.get(field) for field in ("id", "name", "courseId")
+        ):
+            continue
+        if (course.get("availability") or {}).get("available") == "No":
+            continue
+        courses.append(course)
+    return courses
+
+
 def main() -> None:
     """主函数"""
     args = parse_args()
@@ -190,19 +211,7 @@ def main() -> None:
         sys.exit(0)
 
     # 获取每个课程的详细信息
-    courses = []
-    for membership in memberships:
-        course_id = membership.get("courseId", "")
-        if not course_id:
-            continue
-        try:
-            course = api.get_course(course_id)
-            # 跳过不可用的课程
-            if course.get("availability", {}).get("available", "") == "No":
-                continue
-            courses.append(course)
-        except Exception:
-            continue
+    courses = get_available_courses(api, memberships)
 
     if not courses:
         console.print("[yellow]⚠ 没有可用的课程[/yellow]")

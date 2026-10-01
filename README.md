@@ -32,7 +32,7 @@ Automatically download **all** course files from [Blackboard Learn](https://www.
 | **Campus TLS** | Optional compatibility adapter for OpenSSL 3 / strict campus TLS; opt out with `BB_TLS_STRICT` |
 | **Course selection** | Lists enrollments; filter by keywords or download everything with `--all` |
 | **Folder layout** | Mirrors Blackboard content folders on disk |
-| **Incremental sync** | Skips files that already exist with the same size |
+| **Incremental sync** | Checks the final response filename and size before streaming; when the server omits size, skips an existing nonempty file |
 | **Progress & retries** | Rich progress bars; failed downloads retry with backoff |
 
 ---

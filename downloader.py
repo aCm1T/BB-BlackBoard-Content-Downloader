@@ -4,6 +4,7 @@
 
 import os
 import re
+import tempfile
 import time
 
 import requests
@@ -84,6 +85,25 @@ def ensure_unique_path(path: str) -> str:
     while os.path.exists(f"{base} ({counter}){ext}"):
         counter += 1
     return f"{base} ({counter}){ext}"
+
+
+def find_existing_path(path: str, size: int | None) -> str | None:
+    """Find an existing base or numbered copy matching the download size."""
+    parent = os.path.dirname(path)
+    base, ext = os.path.splitext(os.path.basename(path))
+    numbered = re.compile(rf"{re.escape(base)} \([1-9][0-9]*\){re.escape(ext)}")
+    candidates = [path]
+    candidates.extend(
+        os.path.join(parent, name)
+        for name in os.listdir(parent)
+        if numbered.fullmatch(name)
+    )
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            existing_size = os.path.getsize(candidate)
+            if existing_size == size or (size is None and existing_size > 0):
+                return candidate
+    return None
 
 
 class CourseDownloader:
@@ -200,15 +220,6 @@ class CourseDownloader:
             safe_name = sanitize_filename(file_name)
             file_path = os.path.join(parent_dir, safe_name)
 
-            # 检查文件是否已存在（简单的大小比对）
-            if os.path.exists(file_path):
-                existing_size = os.path.getsize(file_path)
-                expected_size = attachment.get("size", -1)
-                if expected_size > 0 and existing_size == expected_size:
-                    self.stats["files_skipped"] += 1
-                    console.print(f"   [dim]⏭ 已存在: {safe_name}[/dim]")
-                    continue
-
             # 下载文件
             self._download_file(
                 course_id, content_id, attachment_id, file_path, safe_name
@@ -233,13 +244,21 @@ class CourseDownloader:
             display_name: 显示名称
         """
         for attempt in range(1, MAX_RETRIES + 1):
+            resp = None
+            temp_path = None
             try:
                 resp = self.api.download_attachment(
                     course_id, content_id, attachment_id
                 )
 
-                # 获取文件大小
-                total_size = int(resp.headers.get("content-length", 0))
+                # The attachment listing has no size field. The streamed response
+                # supplies the size and final filename before its body is read.
+                try:
+                    total_size = int(resp.headers.get("content-length", ""))
+                    if total_size < 0:
+                        total_size = None
+                except (TypeError, ValueError):
+                    total_size = None
 
                 # 如果响应头有文件名，优先使用
                 content_disp = resp.headers.get("content-disposition", "")
@@ -253,11 +272,18 @@ class CourseDownloader:
                             file_path = os.path.join(parent, safe_server_name)
                             display_name = safe_server_name
 
-                # 确保路径唯一
-                file_path = ensure_unique_path(file_path)
+                if find_existing_path(file_path, total_size) is not None:
+                    self.stats["files_skipped"] += 1
+                    console.print(f"   [dim]⏭ 已存在: {display_name}[/dim]")
+                    return
+
+                # Write to a temporary file so a failed transfer cannot look complete.
+                fd, temp_path = tempfile.mkstemp(
+                    prefix=".bb-download-", dir=os.path.dirname(file_path)
+                )
 
                 # 使用 rich 进度条下载
-                with Progress(
+                with os.fdopen(fd, "wb") as f, Progress(
                     SpinnerColumn(),
                     TextColumn("[bold blue]{task.fields[filename]}"),
                     BarColumn(bar_width=30),
@@ -269,17 +295,31 @@ class CourseDownloader:
                 ) as progress:
                     task = progress.add_task(
                         "下载中",
-                        total=total_size if total_size > 0 else None,
+                        total=(
+                            total_size
+                            if total_size is not None and total_size > 0
+                            else None
+                        ),
                         filename=display_name[:50],
                     )
 
-                    with open(file_path, "wb") as f:
-                        downloaded = 0
-                        for chunk in resp.iter_content(chunk_size=8192):
-                            if chunk:
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                progress.update(task, completed=downloaded)
+                    downloaded = 0
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            progress.update(task, completed=downloaded)
+
+                if (
+                    total_size is not None
+                    and resp.headers.get("content-encoding", "identity") == "identity"
+                    and downloaded != total_size
+                ):
+                    raise IOError(f"incomplete download: {downloaded}/{total_size} bytes")
+
+                file_path = ensure_unique_path(file_path)
+                os.replace(temp_path, file_path)
+                temp_path = None
 
                 self.stats["files_downloaded"] += 1
                 self.stats["total_bytes"] += os.path.getsize(file_path)
@@ -298,6 +338,11 @@ class CourseDownloader:
                         f"   [red]✗ 下载失败: {display_name} - {e}[/red]"
                     )
                     self.stats["files_failed"] += 1
+            finally:
+                if temp_path is not None and os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                if resp is not None:
+                    resp.close()
 
     def print_stats(self) -> None:
         """打印下载统计"""

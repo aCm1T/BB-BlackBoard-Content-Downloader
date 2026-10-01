@@ -12,6 +12,8 @@ env/
 
 # Downloaded course files — never push to GitHub
 downloads/
+.bb-download-index.json
+.bb-versions/
 
 # Session cache (contains credentials)
 cookies.json

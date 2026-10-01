@@ -7,10 +7,11 @@ CLI 入口
 
 import argparse
 import sys
+from collections import Counter
 
+import questionary
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
 
 from auth import get_session
 from api import BlackboardAPI
@@ -60,35 +61,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def display_courses(courses: list[dict]) -> None:
-    """以表格形式显示课程列表"""
-    table = Table(
-        title="📚 已注册课程",
-        show_lines=True,
-        border_style="cyan",
-    )
-    table.add_column("#", style="bold yellow", width=4, justify="center")
-    table.add_column("课程名称", style="bold white", min_width=30)
-    table.add_column("课程 ID", style="dim")
-    table.add_column("学期", style="green")
-
-    for i, course in enumerate(courses, 1):
-        name = course.get("name", "N/A")
-        course_id = course.get("courseId", "N/A")
-
-        # 尝试从课程名称中提取学期信息
-        term = ""
-        if course.get("term"):
-            term = course["term"].get("name", "")
-
-        table.add_row(str(i), name, course_id, term)
-
-    console.print(table)
-
-
 def select_courses(courses: list[dict], keywords: list[str] | None = None) -> list[dict]:
     """
-    让用户选择要下载的课程
+    通过关键词或交互式复选框选择课程
 
     Args:
         courses: 全部课程列表
@@ -110,36 +85,34 @@ def select_courses(courses: list[dict], keywords: list[str] | None = None) -> li
         else:
             console.print("[yellow]⚠ 没有匹配的课程，显示全部课程[/yellow]")
 
-    display_courses(courses)
+    name_counts = Counter(course["name"] for course in courses)
+    choices = [
+        questionary.Choice(
+            title=(
+                course["name"]
+                if name_counts[course["name"]] == 1
+                else f"{course['name']}  ({course['courseId']})"
+            ),
+            value=index,
+        )
+        for index, course in enumerate(courses)
+    ]
+    try:
+        selected = questionary.checkbox(
+            "请选择要下载的课程",
+            choices=choices,
+            instruction="↑↓ 移动，空格勾选，回车确认；Ctrl+C 退出",
+            validate=lambda values: bool(values) or "请至少选择一门课程",
+        ).ask()
+    except KeyboardInterrupt:
+        selected = None
 
-    console.print(
-        "\n[bold]请输入要下载的课程编号[/bold] "
-        "[dim](用逗号分隔多个，输入 'all' 下载全部，输入 'q' 退出)[/dim]"
-    )
+    if selected is None:
+        console.print("[dim]👋 已退出[/dim]")
+        sys.exit(0)
 
-    while True:
-        choice = console.input("[bold yellow]>>> [/bold yellow]").strip()
-
-        if choice.lower() == "q":
-            console.print("[dim]👋 已退出[/dim]")
-            sys.exit(0)
-
-        if choice.lower() == "all":
-            return courses
-
-        try:
-            indices = [int(x.strip()) for x in choice.split(",")]
-            selected = []
-            for idx in indices:
-                if 1 <= idx <= len(courses):
-                    selected.append(courses[idx - 1])
-                else:
-                    console.print(f"[yellow]⚠ 编号 {idx} 超出范围，已忽略[/yellow]")
-            if selected:
-                return selected
-            console.print("[yellow]请输入有效的编号[/yellow]")
-        except ValueError:
-            console.print("[yellow]请输入数字编号，用逗号分隔[/yellow]")
+    selected_indices = set(selected)
+    return [course for index, course in enumerate(courses) if index in selected_indices]
 
 
 def get_available_courses(api: BlackboardAPI, memberships: list[dict]) -> list[dict]:

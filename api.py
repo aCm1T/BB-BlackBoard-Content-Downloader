@@ -149,6 +149,7 @@ class BlackboardAPI:
         course_id: str,
         content_id: str,
         attachment_id: str,
+        headers: dict | None = None,
     ) -> requests.Response:
         """
         下载附件，返回 Response 对象（流式）
@@ -165,14 +166,21 @@ class BlackboardAPI:
             f"{self.base_url}/courses/{course_id}/contents/{content_id}"
             f"/attachments/{attachment_id}/download"
         )
-        resp = self.session.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT, allow_redirects=True)
+        resp = self.session.get(
+            url,
+            headers=headers,
+            stream=True,
+            timeout=DOWNLOAD_TIMEOUT,
+            allow_redirects=True,
+        )
         resp.raise_for_status()
         return resp
 
-    def download_url(self, url: str) -> requests.Response:
+    def download_url(self, url: str, headers: dict | None = None) -> requests.Response:
         """Download a file from an authenticated Blackboard URL."""
         resp = self.session.get(
             url,
+            headers=headers,
             stream=True,
             timeout=DOWNLOAD_TIMEOUT,
             allow_redirects=True,

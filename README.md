@@ -30,10 +30,11 @@ Automatically download **all** course files from [Blackboard Learn](https://www.
 | **Cookie cache** | Saves `cookies.json` locally; skip the browser on the next run if still valid |
 | **`.env` loading** | Reads `BB_BASE_URL` (and options) from a local `.env` via `python-dotenv` |
 | **Campus TLS** | Optional compatibility adapter for OpenSSL 3 / strict campus TLS; opt out with `BB_TLS_STRICT` |
-| **Course selection** | Lists enrollments; filter by keywords or download everything with `--all` |
+| **Course selection** | Choose multiple courses with terminal checkboxes; filter by keywords or download everything with `--all` |
 | **Folder layout** | Mirrors Blackboard content folders on disk |
 | **Embedded files** | Downloads files embedded in content bodies, assessment instructions, and announcements, including assignment PDFs/DOCX files |
-| **Incremental sync** | Checks the final response filename and size before streaming; when the server omits size, skips an existing nonempty file |
+| **Incremental sync** | Revalidates every file with ETag/Last-Modified; compares bytes and updates changed files even when the size is unchanged |
+| **Parallel checks** | Checks up to four files at once to reduce waiting on Blackboard redirects |
 | **Progress & retries** | Rich progress bars; failed downloads retry with backoff |
 
 ---
@@ -129,6 +130,10 @@ usage: main.py [-h] [-o OUTPUT_DIR] [-c [COURSE ...]] [--relogin] [--all]
 | `--all` | Download all courses (no prompt) | `python main.py --all` |
 | `--relogin` | Ignore cache; open browser again | `python main.py --relogin` |
 
+Without `--course` or `--all`, use ↑/↓ to move through the course list, Space to check multiple courses, and Enter to start downloading. Ctrl+C cancels selection.
+
+On the first run after this update, existing files are downloaded once for a byte-for-byte comparison so the local index can be built. Later runs revalidate every file with Blackboard; unchanged responses do not transfer the file body. When a remote file changes, the previous local copy is saved under `.bb-versions/` and the current file is replaced. Locally edited files are kept and the remote version is saved with a numbered filename.
+
 **Examples**
 
 ```bash
@@ -165,6 +170,7 @@ These paths are listed in **`.gitignore`** so they stay on your machine only:
 | Path | Reason |
 |------|--------|
 | **`downloads/`** | Downloaded teaching materials — large and personal |
+| **`.bb-download-index.json`**, **`.bb-versions/`** | Local file validators and saved older versions, inside the download directory |
 | **`.env`** | Your institution URL / flags (copy from `env.template`) |
 | **`cookies.json`** | Session cookies — sensitive |
 | **`.venv/`**, **`__pycache__/`** | Local environment and bytecode |
@@ -239,4 +245,6 @@ This project is licensed under the [MIT License](LICENSE).
 - **下载目录**：默认 **`downloads/`** 已在 `.gitignore` 中，**不会**随仓库上传。  
 - **会话**：**`cookies.json`** 含登录态，已忽略，请勿提交。  
 - **浏览器**：首次需手动登录；若已缓存有效 Cookie，再次运行可能不弹窗，可用 `python main.py --relogin`。  
+- **选课**：不加 `--course` 或 `--all` 时，用 ↑/↓ 移动、空格勾选多门课程、回车确认；Ctrl+C 取消。
+- **文件更新**：首次升级后会下载旧文件进行一次内容核对，之后每次运行均向服务器验证版本；更新时旧版保存在下载目录的 `.bb-versions/` 中。
 - **许可**：见仓库根目录 **[LICENSE](LICENSE)**（MIT）。

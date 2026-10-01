@@ -34,6 +34,18 @@ class BlackboardAPI:
                 return {"results": []}
             elif status == 404:
                 return {"results": []}
+            elif status == 400 and endpoint.endswith("/attachments"):
+                try:
+                    error = e.response.json()
+                except ValueError:
+                    error = {}
+                message = error.get("message", "") if isinstance(error, dict) else ""
+                if isinstance(message, str) and (
+                    "does not support file attachments" in message.lower()
+                ):
+                    return {"results": []}
+                console.print(f"[red]✗ API 错误 {status}: {endpoint}[/red]")
+                raise
             else:
                 console.print(f"[red]✗ API 错误 {status}: {endpoint}[/red]")
                 raise
@@ -98,6 +110,10 @@ class BlackboardAPI:
         """
         return self._get_paginated(f"/courses/{course_id}/contents")
 
+    def get_course_announcements(self, course_id: str) -> list[dict]:
+        """Get all announcements for a course."""
+        return self._get_paginated(f"/courses/{course_id}/announcements")
+
     def get_content_children(self, course_id: str, content_id: str) -> list[dict]:
         """
         获取内容项的子内容
@@ -133,6 +149,7 @@ class BlackboardAPI:
         course_id: str,
         content_id: str,
         attachment_id: str,
+        headers: dict | None = None,
     ) -> requests.Response:
         """
         下载附件，返回 Response 对象（流式）
@@ -149,6 +166,24 @@ class BlackboardAPI:
             f"{self.base_url}/courses/{course_id}/contents/{content_id}"
             f"/attachments/{attachment_id}/download"
         )
-        resp = self.session.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT, allow_redirects=True)
+        resp = self.session.get(
+            url,
+            headers=headers,
+            stream=True,
+            timeout=DOWNLOAD_TIMEOUT,
+            allow_redirects=True,
+        )
+        resp.raise_for_status()
+        return resp
+
+    def download_url(self, url: str, headers: dict | None = None) -> requests.Response:
+        """Download a file from an authenticated Blackboard URL."""
+        resp = self.session.get(
+            url,
+            headers=headers,
+            stream=True,
+            timeout=DOWNLOAD_TIMEOUT,
+            allow_redirects=True,
+        )
         resp.raise_for_status()
         return resp

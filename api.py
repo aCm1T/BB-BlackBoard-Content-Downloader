@@ -34,6 +34,18 @@ class BlackboardAPI:
                 return {"results": []}
             elif status == 404:
                 return {"results": []}
+            elif status == 400 and endpoint.endswith("/attachments"):
+                try:
+                    error = e.response.json()
+                except ValueError:
+                    error = {}
+                message = error.get("message", "") if isinstance(error, dict) else ""
+                if isinstance(message, str) and (
+                    "does not support file attachments" in message.lower()
+                ):
+                    return {"results": []}
+                console.print(f"[red]✗ API 错误 {status}: {endpoint}[/red]")
+                raise
             else:
                 console.print(f"[red]✗ API 错误 {status}: {endpoint}[/red]")
                 raise

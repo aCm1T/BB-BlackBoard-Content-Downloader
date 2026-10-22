@@ -32,6 +32,7 @@ Automatically download **all** course files from [Blackboard Learn](https://www.
 | **Campus TLS** | Optional compatibility adapter for OpenSSL 3 / strict campus TLS; opt out with `BB_TLS_STRICT` |
 | **Course selection** | Lists enrollments; filter by keywords or download everything with `--all` |
 | **Folder layout** | Mirrors Blackboard content folders on disk |
+| **Embedded files** | Downloads files embedded in content bodies, assessment instructions, and announcements, including assignment PDFs/DOCX files |
 | **Incremental sync** | Skips files that already exist with the same size |
 | **Progress & retries** | Rich progress bars; failed downloads retry with backoff |
 
@@ -178,7 +179,7 @@ These paths are listed in **`.gitignore`** so they stay on your machine only:
 main.py          CLI — args, course selection, orchestration
 auth.py          Selenium login → cookies → requests session + TLS compat + /users/me check
 api.py           Blackboard Learn Public API v1 (pagination, errors)
-downloader.py    Recursive contents + streamed attachment downloads
+downloader.py    Recursive contents + streamed attachment/embedded-file downloads
 config.py        load_dotenv(".env"), URLs, timeouts, retries
 ```
 
@@ -190,7 +191,8 @@ Browser login (or valid cookies.json)
   → GET /learn/api/public/v1/users/me
   → /users/{id}/courses
   → /courses/{id}/contents (recursive)
-  → /attachments/{id}/download
+  → /courses/{id}/announcements
+  → /attachments/{id}/download and embedded `data-bbfile` URLs
 ```
 
 ---
@@ -210,6 +212,12 @@ Browser login (or valid cookies.json)
 ## Contributing
 
 Issues and pull requests are welcome. For larger changes, please open an issue first to agree on direction.
+
+Run the regression tests with:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ---
 
